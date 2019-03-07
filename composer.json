@@ -1,0 +1,27 @@
+{
+    "name": "smart/arangodb",
+    "description": "Implement arangodb in yii2 (Smart)",
+    "type": "yii2-extension",
+    "version": "1.0.0",
+    "keywords": [
+        "smart",
+        "arangodb"
+    ],
+    "authors": [
+        {
+            "name": "Ata amini",
+            "email": "ata.aminie@gmail.com"
+        }
+    ],
+    "require": {
+        "ext-ctype": "*",
+        "yiisoft/yii2": "*",
+        "smart/framework": "*",
+        "triagens/arangodb": "*"
+    },
+    "autoload": {
+        "psr-4": {
+            "Smart\\Arangodb\\": "src/"
+        }
+    }
+}
