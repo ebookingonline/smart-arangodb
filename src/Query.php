@@ -14,8 +14,6 @@
     use yii\base\Component;
     use yii\db\QueryInterface;
     use yii\helpers\ArrayHelper;
-    use ArangoDBClient\Document;
-    use ArangoDBClient\Statement;
     use yii\base\NotSupportedException;
     use yii\base\InvalidArgumentException;
 
@@ -32,35 +30,46 @@
         public $separator = " ";
 
         protected $conditionBuilders = [
-            'NOT'     => 'buildNotCondition',
-            'AND'     => 'buildAndCondition',
-            'OR'      => 'buildAndCondition',
-            'IN'      => 'buildInCondition',
-            'LIKE'    => 'buildLikeCondition',
-            'BETWEEN' => 'buildBetweenCondition',
+            'Equal'            => 'buildEqualityCondition',
+            'GreaterThan'      => 'buildEqualityCondition',
+            'GreaterThanEqual' => 'buildEqualityCondition',
+            'LessThan'         => 'buildEqualityCondition',
+            'LessThanEqual'    => 'buildEqualityCondition',
+            'NOT'              => 'buildNotCondition',
+            'AND'              => 'buildAndCondition',
+            'OR'               => 'buildAndCondition',
+            'In'               => 'buildInCondition',
+            'LIKE'             => 'buildLikeCondition',
+            'BETWEEN'          => 'buildBetweenCondition',
         ];
 
         protected $conditionMap = [
-            'NOT'  => '!',
-            'AND'  => '&&',
-            'OR'   => '||',
-            'IN'   => 'in',
-            'LIKE' => 'LIKE',
+            'NOT'              => '!',
+            'AND'              => '&&',
+            'OR'               => '||',
+            'IN'               => 'in',
+            'LIKE'             => 'LIKE',
+            'Equal'            => '==',
+            'GreaterThan'      => '>',
+            'GreaterThanEqual' => '>=',
+            'LessThan'         => '<',
+            'LessThanEqual'    => '<=',
+
+        ];
+
+        protected $mapAs = [
+            '='  => 'equal',
+            '!=' => 'not',
+            '<>' => 'not',
+            '>'  => 'greaterThan',
+            '>=' => 'greaterThanEqual',
+            '<'  => 'lessThan',
+            '<=' => 'lessThanEqual',
         ];
 
         public $select = [];
 
         public $from;
-
-        public $where;
-
-        public $limit;
-
-        public $offset;
-
-        public $orderBy;
-
-        public $indexBy;
 
         public $params = [];
 
@@ -69,7 +78,7 @@
         /**
          * @param array           $options
          * @param null|Connection $db
-         * @return null|Statement
+         * @return null|\ArangoDBClient\Statement
          * @throws \ArangoDBClient\Exception
          * @throws \yii\base\InvalidConfigException
          */
@@ -110,7 +119,7 @@
         /**
          * @param null|Connection $db
          * @param array           $options
-         * @return null|Statement
+         * @return null|\ArangoDBClient\Statement
          * @throws \ArangoDBClient\Exception
          * @throws \yii\base\InvalidConfigException
          */
@@ -231,21 +240,46 @@
             if (strpos($name, '(') !== false || strpos($name, '[[') !== false || strpos($name, '{{') !== false) {
                 return $name;
             }
-            if (($pos = strrpos($name, '.')) !== false) {
-                $prefix = substr($name, 0, $pos);
-                $prefix = $this->quoteCollectionName($prefix) . '.';
-                $name = substr($name, $pos + 1);
-            } else {
-                $prefix = $this->quoteCollectionName($this->from) . '.';
+
+            // crate name with prefix
+            $name = explode('.', $name);
+
+            // remove collection name if first instance is collection name
+            $prefix = $this->quoteCollectionName($this->from);
+            if (isset($name[0]) && $name[0] == $this->from) {
+                unset($name[0]);
             }
 
-            return $prefix . $name;
+            // quote name items
+            array_walk($name, function ($Value, $index) use (&$name) {
+                $name[$index] = '`' . implode('`', explode('.', $Value)) . '`';
+            });
+
+            $name = implode('.', $name);
+            return "{$prefix}.{$name}";
+        }
+
+        /**
+         * Quote value.
+         * @param $value
+         * @return string
+         */
+        public function quoteValue($value)
+        {
+            if (is_numeric($value))
+                return $value;
+
+            if (is_string($value))
+                return "'{$value}'";
+
+            return $value;
         }
 
         /**
          * @param $condition
          * @param $params
          * @return string
+         * @throws \Exception
          */
         protected function buildWhere($condition, &$params)
         {
@@ -258,6 +292,7 @@
          * @param $condition
          * @param $params
          * @return string
+         * @throws \Exception
          */
         protected function buildCondition($condition, &$params)
         {
@@ -266,9 +301,11 @@
             } elseif (empty($condition)) {
                 return '';
             }
-
             if (isset($condition[0])) { // operator format: operator, operand 1, operand 2, ...
-                $operator = strtoupper($condition[0]);
+                $operator = $condition[0];
+                $operator = (isset($this->mapAs[$operator]) ? $this->mapAs[$operator] : $operator);
+                $operator = $this->ensureCamelCase($operator, true);
+
                 if (isset($this->conditionBuilders[$operator])) {
                     $method = $this->conditionBuilders[$operator];
                     array_shift($condition);
@@ -285,6 +322,7 @@
          * @param $condition
          * @param $params
          * @return string
+         * @throws \Exception
          */
         protected function buildHashCondition($condition, &$params)
         {
@@ -334,10 +372,27 @@
         }
 
         /**
+         * Make equal operation condition.
          * @param $operator
          * @param $operands
          * @param $params
          * @return string
+         */
+        protected function buildEqualityCondition($operator, $operands, &$params)
+        {
+            if (count($operands) < 2)
+                throw new InvalidArgumentException("Operator '$operator' requires exactly two operand.");
+            $key = $this->quoteColumnName($operands[0]);
+            $value = $this->quoteValue($operands[1]);
+            return "{$key} {$this->conditionMap[$operator]} {$value}";
+        }
+
+        /**
+         * @param $operator
+         * @param $operands
+         * @param $params
+         * @return string
+         * @throws \Exception
          */
         protected function buildNotCondition($operator, $operands, &$params)
         {
@@ -614,7 +669,7 @@
         }
 
         /**
-         * @param Statement $statement
+         * @param \ArangoDBClient\Statement $statement
          * @return string
          */
         protected static function getRawAql($statement)
@@ -841,13 +896,13 @@
         }
 
         /**
-         * @param Document[] $rows
+         * @param \ArangoDBClient\Document[] $rows
          * @return array
          */
         public function prepareResult($rows)
         {
             $result = [];
-            if (isset($rows[0]) && $rows[0] instanceof Document) {
+            if (isset($rows[0]) && $rows[0] instanceof \ArangoDBClient\Document) {
                 if ($this->indexBy === null) {
                     foreach ($rows as $row) {
                         $result[] = $row->getAll();
@@ -980,6 +1035,7 @@
          * @param array $condition the conditions that should be put in the WHERE part.
          * See [[where()]] on how to specify this parameter.
          * @return static the query object itself.
+         * @throws NotSupportedException
          * @see where()
          * @see andFilterWhere()
          * @see orFilterWhere()
@@ -1002,6 +1058,7 @@
          * @param array $condition the new WHERE condition. Please refer to [[where()]]
          * on how to specify this parameter.
          * @return static the query object itself.
+         * @throws NotSupportedException
          * @see filterWhere()
          * @see orFilterWhere()
          */
@@ -1023,6 +1080,7 @@
          * @param array $condition the new WHERE condition. Please refer to [[where()]]
          * on how to specify this parameter.
          * @return static the query object itself.
+         * @throws NotSupportedException
          * @see filterWhere()
          * @see andFilterWhere()
          */
@@ -1054,7 +1112,7 @@
          * Removes [[isEmpty()|empty operands]] from the given query condition.
          * @param array $condition the original condition
          * @return array the condition with [[isEmpty()|empty operands]] removed.
-         * @throws NotSupportedException if the condition operator is not supported
+         * @throws NotSupportedException
          */
         protected function filterCondition($condition)
         {
@@ -1077,9 +1135,9 @@
             $operator = array_shift($condition);
 
             switch (strtoupper($operator)) {
-                case 'NOT':
-                case 'AND':
-                case 'OR':
+                case 'Not':
+                case 'And':
+                case 'Or':
                     foreach ($condition as $i => $operand) {
                         $subCondition = $this->filterCondition($operand);
                         if ($this->isEmpty($subCondition)) {
@@ -1093,13 +1151,13 @@
                         return [];
                     }
                     break;
-                case 'IN':
-                case 'LIKE':
+                case 'In':
+                case 'Like':
                     if (array_key_exists(1, $condition) && $this->isEmpty($condition[1])) {
                         return [];
                     }
                     break;
-                case 'BETWEEN':
+                case 'Between':
                     if ((array_key_exists(1, $condition) && $this->isEmpty($condition[1]))
                         || (array_key_exists(2, $condition) && $this->isEmpty($condition[2]))) {
                         return [];
@@ -1249,5 +1307,24 @@
                 }
             }
             return $this;
+        }
+
+        /**
+         * Make camel case string.
+         * @param string|array $string
+         * @param bool         $capitalizeFirstCharacter
+         * @return mixed|string
+         */
+        private function ensureCamelCase($string, $capitalizeFirstCharacter = false)
+        {
+            // make array support
+            if (is_array($string))
+                $string = implode(' ', $string);
+
+            $str = preg_replace('/\W+/', '-', $string);
+            $str = str_replace('-', '', ucwords($str, '-'));
+            if (!$capitalizeFirstCharacter)
+                $str = lcfirst($str);
+            return $str;
         }
     }
